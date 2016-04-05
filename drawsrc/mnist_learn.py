@@ -62,6 +62,7 @@ import numpy as np
 import tensorflow as tf
 import png
 import sys
+import random
 
 from tensorflow.models.rnn.ptb import reader
 from tensorflow.examples.tutorials.mnist import input_data
@@ -101,7 +102,6 @@ class DRAWModel(object):
         enc_lstm_cell = tf.nn.rnn_cell.DropoutWrapper(enc_lstm_cell, output_keep_prob=config.keep_prob)
 
     # Output matrix weight
-    #TODO: Maybe there needs to be bias here
     mean_W = tf.Variable(tf.random_normal([size, size], stddev=0.01))
     mean_bias = tf.Variable(tf.random_normal([size], stddev=0.01))
     stddev_W = tf.Variable(tf.random_normal([size, size], stddev=0.01))
@@ -114,7 +114,6 @@ class DRAWModel(object):
         dec_lstm_cell = tf.nn.rnn_cell.DropoutWrapper(dec_lstm_cell, output_keep_prob=config.keep_prob)
 
     # Output matrix weight
-    #TODO: Maybe there needs to be bias here
     output_W = tf.Variable(tf.random_normal([size, 784], stddev=0.01))
     output_bias = tf.Variable(tf.random_normal([784], stddev=0.01))
 
@@ -250,11 +249,11 @@ class DRAWModel(object):
 class SmallConfig(object):
   """Small config."""
   init_scale = 0.1
-  learning_rate = 1
+  learning_rate = 0.5
   max_grad_norm = 1
   num_layers = 2
-  num_steps = 20
-  hidden_size = 32
+  num_steps = 10
+  hidden_size = 16
   max_epoch = 4
   max_max_epoch = 13
   keep_prob = 1.0
@@ -384,10 +383,17 @@ def get_config():
   else:
     raise ValueError("Invalid model: %s", FLAGS.model)
 
+def binarize(data):
+  random = np.random.uniform(size=np.shape(data))
+  index =np.greater(random,data)
+  data[index] = 0
+  data[np.logical_not(index)] = 1
+  return data
 
 def main(_):
+  #TODO: binarize the input: http://homepages.inf.ed.ac.uk/imurray2/pub/08dbn_ais/dbn_ais.pdf
   mnist = input_data.read_data_sets("MNIST_data/", one_hot=True)
-  train_data, valid_data, test_data = mnist.train.images, mnist.validation.images, mnist.test.images
+  train_data, valid_data, test_data = binarize(mnist.train.images), binarize(mnist.validation.images), binarize(mnist.test.images)
 
   config = get_config()
   eval_config = get_config()
