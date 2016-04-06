@@ -67,6 +67,8 @@ import random
 from tensorflow.models.rnn.ptb import reader
 from tensorflow.examples.tutorials.mnist import input_data
 
+from filterbank import read_vec, write_vec
+
 flags = tf.flags
 logging = tf.logging
 
@@ -82,16 +84,21 @@ class DRAWModel(object):
   """The DRAW model."""
 
   def __init__(self, is_training, config, reuse=False):
+    self.read_size=2
+    self.write_size=5
+    self.data_size=28
     self.batch_size = batch_size = config.batch_size
     self.num_steps = num_steps = config.num_steps
+    self.read_strides = config.read_strides
+    self.write_strides = config.write_strides
     size = config.hidden_size
 
-    self._input_data = tf.placeholder(tf.float32, [batch_size, 784])
-    self._targets = tf.placeholder(tf.float32, [batch_size, 784])
+    self._input_data = tf.placeholder(tf.float32, [batch_size, self.data_size**2])
+    self._targets = tf.placeholder(tf.float32, [batch_size, self.data_size**2])
 
 
     # The MNIST digit
-    inputs = tf.placeholder("float", [None, 784])
+    inputs = tf.placeholder("float", [None, self.data_size**2])
 
     if is_training and config.keep_prob < 1:
       inputs = tf.nn.dropout(inputs, config.keep_prob)
@@ -114,14 +121,19 @@ class DRAWModel(object):
         dec_lstm_cell = tf.nn.rnn_cell.DropoutWrapper(dec_lstm_cell, output_keep_prob=config.keep_prob)
 
     # Output matrix weight
-    output_W = tf.Variable(tf.random_normal([size, 784], stddev=0.01))
-    output_bias = tf.Variable(tf.random_normal([784], stddev=0.01))
+    output_W = tf.Variable(tf.random_normal([size, self.write_size**2], stddev=0.01))
+    output_bias = tf.Variable(tf.random_normal([self.write_size**2], stddev=0.01))
 
+    read_attn_W = tf.Variable(tf.random_normal([dec_lstm_cell.state_size, 5], stddev=0.01))
+    read_attn_bias = tf.Variable(tf.random_normal([5], stddev=0.01))
 
-    canvas = tf.placeholder("float", [None, 784])
+    write_attn_W = tf.Variable(tf.random_normal([dec_lstm_cell.state_size, 5], stddev=0.01))
+    write_attn_bias = tf.Variable(tf.random_normal([5], stddev=0.01))
+
+    canvas = tf.placeholder("float", [None, self.data_size**2])
     self._enc_state = enc_lstm_cell.zero_state(batch_size, tf.float32)
     self._dec_state = dec_lstm_cell.zero_state(batch_size, tf.float32)
-    self._canvas_state = tf.zeros([batch_size, 784])
+    self._canvas_state = tf.zeros([batch_size, self.data_size**2])
 
 
     # Wire together an unrolled RNN
@@ -135,10 +147,13 @@ class DRAWModel(object):
       for time_step in range(num_steps):
         if time_step > 0: tf.get_variable_scope().reuse_variables()
         input_error = tf.sub(tf.to_float(self._input_data), tf.sigmoid(canvas_state))
-
+        input_attn_param = tf.matmul(dec_state, read_attn_W) + read_attn_bias
+        input_attn = read_vec(self._input_data, input_attn_param, [self.data_size, self.data_size], self.read_strides)
+        input_attn_error = read_vec(input_error, input_attn_param, [self.data_size, self.data_size], self.read_strides)
+        lstm_input = tf.reshape(tf.concat(1,[input_attn,input_attn_error]), [-1,self.read_size**2+self.read_size**2])
         with tf.variable_scope('encode', reuse=reuse):
-          lstm_input = tf.reshape(tf.concat(1,[tf.to_float(self._input_data),input_error]), [-1,784+784])
           (enc_cell_output, enc_state) = enc_lstm_cell(lstm_input, enc_state)
+
         sample_mean=tf.add(tf.matmul(enc_cell_output,mean_W), mean_bias)
         sample_stddev=tf.add(tf.matmul(enc_cell_output,stddev_W),stddev_bias)
         means.append(tf.reduce_sum(tf.mul(sample_mean,sample_mean), 1))
@@ -147,18 +162,22 @@ class DRAWModel(object):
 
         with tf.variable_scope('decode', reuse=reuse):
           (dec_cell_output, dec_state) = dec_lstm_cell(sampled, dec_state)
-        canvas_state = tf.add(canvas_state, tf.add(tf.matmul(dec_cell_output, output_W), output_bias))
+
+        output_attn_param = tf.matmul(dec_state,write_attn_W) + write_attn_bias
+        windows = tf.matmul(dec_cell_output,output_W)+output_bias
+        output_attn = write_vec(windows, output_attn_param, [self.data_size, self.data_size], self.write_strides)
+        canvas_state = tf.add(canvas_state, output_attn)
         outputs.append(tf.sigmoid(canvas_state))
 
     output = outputs[-1]
 
    # elementwise = tf.cast(tf.abs(tf.sub(self._targets, output)), dtype=tf.float64)
     elementwise = tf.cast(tf.select(tf.greater(tf.constant(0.5), self._targets),
-                tf.sub(tf.ones([batch_size,784]), output), output), tf.float64)
+                tf.sub(tf.ones([batch_size,self.data_size**2]), output), output), tf.float64)
 
     # Underflow and rounding errors may cause 0 to appear in elementwise, which causes inf cost and ultimately nans everywhere
     elementwise = tf.select(tf.equal(tf.constant(0, dtype=tf.float64), elementwise),
-                            tf.cast(tf.fill([batch_size,784], sys.float_info.epsilon), tf.float64),
+                            tf.cast(tf.fill([batch_size,self.data_size**2], sys.float_info.epsilon), tf.float64),
                             elementwise)
 
     reconstruction_loss = tf.neg(tf.log(tf.reduce_prod(elementwise, reduction_indices=[1])))
@@ -249,50 +268,18 @@ class DRAWModel(object):
 class SmallConfig(object):
   """Small config."""
   init_scale = 0.1
-  learning_rate = 0.5
+  learning_rate = 0.05
   max_grad_norm = 1
-  num_layers = 2
-  num_steps = 10
-  hidden_size = 16
+  num_steps = 50
+  hidden_size = 128
   max_epoch = 4
   max_max_epoch = 13
   keep_prob = 1.0
   lr_decay = 0.5
   batch_size = 20
   vocab_size = 10000
-
-
-class MediumConfig(object):
-  """Medium config."""
-  init_scale = 0.05
-  learning_rate = 1
-  max_grad_norm = 5
-  num_layers = 2
-  num_steps = 35
-  hidden_size = 650
-  max_epoch = 6
-  max_max_epoch = 39
-  keep_prob = 0.5
-  lr_decay = 0.8
-  batch_size = 20
-  vocab_size = 10000
-
-
-class LargeConfig(object):
-  """Large config."""
-  init_scale = 0.04
-  learning_rate = 1
-  max_grad_norm = 10
-  num_layers = 2
-  num_steps = 35
-  hidden_size = 1500
-  max_epoch = 14
-  max_max_epoch = 55
-  keep_prob = 0.35
-  lr_decay = 1 / 1.15
-  batch_size = 20
-  vocab_size = 10000
-
+  read_strides = 2
+  write_strides = 5
 
 class TestConfig(object):
   """Tiny config, for testing."""
@@ -321,7 +308,7 @@ def arrange_images(data):
   return scale(np.reshape(data, [-1, 28]))
 
 def dump_images(input, outputs, x):
-  f = open('/Users/mwagner/git/draw-network/imgs/%d.png' % x, 'wb')      # binary mode is important
+  f = open('imgs/%d.png' % x, 'wb')      # binary mode is important
   column_input = list(arrange_images(input))
   column_outputs = [arrange_images(x) for x in list(outputs)]
 
@@ -364,7 +351,7 @@ def run_epoch(session, m, data, eval_op, verbose=False, epoch=0):
       global_step = epoch*epoch_size + iters
       print(np.shape(outputs))
       dump_images(x, outputs, global_step)
-      save_path = saver.save(session, "/Users/mwagner/git/draw-network/checkpoints/lstm-only-bias", global_step=global_step)
+      save_path = saver.save(session, "checkpoints/lstm-only-bias", global_step=global_step)
       print("Model saved in file: %s" % save_path)
 
 
